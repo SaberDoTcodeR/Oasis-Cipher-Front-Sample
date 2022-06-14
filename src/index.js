@@ -2,7 +2,73 @@
 // @ts-nocheck
 import * as oasis from '@oasisprotocol/client';
 import * as oasisExt from '@oasisprotocol/client-ext-utils';
+import { accounts, contracts, core, token } from '@oasisprotocol/client-rt'
 
+
+const KEYVALUE_RUNTIME_ID = oasis.misc.fromHex(
+  '0000000000000000000000000000000000000000000000000000000000000000',
+);
+async function getCipherAccountInfo(address, nic) {
+  const accountsWrapper = new accounts.Wrapper(KEYVALUE_RUNTIME_ID);
+  const balance_decoded = (await accountsWrapper.queryBalances().setArgs({address}).query(nic)).balances.values().next().value
+  var view = new DataView(balance_decoded.buffer, 0);
+  const balance = view.getUint32(0, false)
+  const nonce = await accountsWrapper
+    .queryNonce()
+    .setArgs({
+      address,
+    })
+    .query(nic)
+  return {
+    nonce,
+    balance
+  };
+}
+
+async function getCounterFromContract(nic) {
+  const contract = new contracts.Wrapper(KEYVALUE_RUNTIME_ID);
+
+  const data = await contract.queryCustom().setArgs({ id: 9, data: oasis.misc.toCBOR({"get_counter": {}})}).query(nic)
+  console.log(oasis.misc.fromCBOR(data))
+}
+
+async function increaseCounterContract(nic, from, nonce) {
+  const contract = new contracts.Wrapper(KEYVALUE_RUNTIME_ID);
+  const tx = await contract.callCall().setBody({
+    id: 9,
+    data: oasis.misc.toCBOR({say_hello: { who: "meeeee"}}),
+    tokens: []
+  })
+  console.log(tx,nonce)
+  const signer = await oasisExt.signature.ExtContextSigner.request(connection, oasis.staking.addressToBech32(from)).catch(err => err);
+  let chainContext = await nic.consensusGetChainContext()
+  // await signer.sign(chainContext, oasis.misc.fromHex("0x01"))
+  const signerInfo = {
+    address_spec: {signature: {ed25519: signer.public()}},
+    nonce: nonce,
+  };
+
+  const core_oasis = new core.Wrapper(KEYVALUE_RUNTIME_ID)
+  const gasFee = await core_oasis.queryEstimateGas().setArgs({
+    caller: {
+      address: from
+    },
+    tx: {
+      call: tx.transaction.call,
+      ai: tx.transaction.ai,
+      v: 1
+    }
+  }).query(nic)
+  console.log(gasFee)
+  tx.setSignerInfo([signerInfo]);
+  tx.setFeeGas(gasFee + 200)
+  tx.setFeeAmount([oasis.quantity.fromBigInt(BigInt(gasFee) * 102n), token.NATIVE_DENOMINATION])
+  console.log( await tx.sign([signer], chainContext))
+  console.log(tx)
+  const ret = await tx.submit(nic)
+
+  console.log(oasis.misc.fromCBOR(ret))
+}
 const haveInterActive = false
 const extPath = haveInterActive ? '/oasis-xu-frame.html?test_noninteractive=1' : undefined;
 
@@ -26,13 +92,13 @@ async function publicKeyToAddress(keyObj){
     account.public_key = public_key
     account.address = address
   }
-  
+
   return address
 }
 
 /**
  * use grpc get nonce
- * @param {*} address 
+ * @param {*} address
  */
 async function getNonce(address) {
   const oasisClient = getOasisClient()
@@ -45,26 +111,23 @@ async function getNonce(address) {
 }
 /**
  * use grpc get nonce
- * @param {*} address 
+ * @param {*} address
  */
 async function getUseBalance(address) {
   const oasisClient = getOasisClient()
   let shortKey = await oasis.staking.addressFromBech32(address)
-  let height = oasis.consensus.HEIGHT_LATEST
-  let account = await oasisClient.stakingAccount({ height: height, owner: shortKey, }).catch((err) => err)
-  let balance = account&&account.general&&account.general.balance || 0
-  if(balance){
-    balance = oasis.quantity.toBigInt(balance).toString()
-  }
-  let nonce = account&&account.general&&account.general.nonce || 0
+  await getCounterFromContract(oasisClient)
+  const { balance, nonce } = await getCipherAccountInfo(shortKey, oasisClient)
+  await increaseCounterContract(oasisClient, shortKey, nonce)
+
   return { balance, nonce }
 }
 /**
  * get grpc client
- * @returns 
+ * @returns
  */
 function getOasisClient() {
-  const oasisClient = new oasis.client.NodeInternal('https://grpc-testnet.oasisscan.com')
+  const oasisClient = new oasis.client.NodeInternal('https://testnet.grpc.oasis.dev')
   // ("https://grpc-testnet.oasisscan.com")
   return oasisClient
 }
@@ -120,7 +183,7 @@ const playground = (async function () {
     oasisExt.keys.setKeysChangeHandler(conn, async (event) => {
       setAccountDetailClear()
       // 拿到新的key后更新 当前账户及别的
-  
+
       let keys = event.keys
       if(keys.length>0){
         let address = await publicKeyToAddress(keys[0])
@@ -129,17 +192,17 @@ const playground = (async function () {
       }
   });
   }
-  
+
 
   // 1,点击connect 去连接账户
   // 2，如果有connect ，则可以点击获取账户
 
 
-  // 3，输入转账金额和收款地址 
+  // 3，输入转账金额和收款地址
   // 获取签名者
   // 打包交易
   // 4，签名
-  let extensionId = "fdkfkdobkkgngljecckfaeiabkinnnij"
+  let extensionId = "ppdadbejkmjnefldpcdjhnkpbjkikoip"
   // "aeiciliacehpifhikhkgkmohihocgain"//"fdkfkdobkkgngljecckfaeiabkinnnij"
 
   const extension_url = "chrome-extension://" + extensionId
@@ -171,7 +234,7 @@ const playground = (async function () {
 
   function setAccountDetailClear() {
     accountsDiv.innerHTML = ""
-    accountsResults.innerHTML = "" 
+    accountsResults.innerHTML = ""
 
     balanceDiv.innerHTML = "0"
     nonceDiv.innerHTML = "null"
@@ -220,6 +283,7 @@ const playground = (async function () {
       // 设置feeGas
       // 设置feeAmount
       let from = account && account.address ? account.address : ""
+      console.log(from)
       const signer = await oasisExt.signature.ExtContextSigner.request(connection, from).catch(err => err);
       if (signer.error) {
         alert(signer.error)
@@ -242,7 +306,6 @@ const playground = (async function () {
 
 
       let sendFeeAmount = 0n
-
       const tw = oasis.staking.transferWrapper()
       tw.setNonce(sendNonce)
 
